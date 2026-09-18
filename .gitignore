@@ -1,9 +1,13 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.tmp/
 .venv/
 .env
 artifacts/
+logs/
+result/
+data/tool_use/train_v2.jsonl
 data/traces/
 data/raw/
 data/workorder/

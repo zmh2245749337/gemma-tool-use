@@ -1,0 +1,52 @@
+{
+  "scope": "training-only V2 curriculum; labels are unchanged",
+  "seed": 42,
+  "input": "data\\tool_use\\train.jsonl",
+  "output": "data\\tool_use\\train_v2.jsonl",
+  "heldout_checked": [
+    "data\\tool_use\\validation.jsonl",
+    "data\\tool_use\\test.jsonl",
+    "data\\tool_use\\challenge.jsonl"
+  ],
+  "base_samples": 1968,
+  "v2_samples": 2724,
+  "eligible_examples": {
+    "no_tool_boundary": 300,
+    "condition_correction": 9,
+    "parameter_dense": 229,
+    "long_state": 1247
+  },
+  "added_examples": {
+    "no_tool_boundary": 300,
+    "condition_correction": 27,
+    "parameter_dense": 229,
+    "long_state": 200
+  },
+  "settings": {
+    "copies_and_caps": {
+      "no_tool_boundary": [
+        1,
+        null
+      ],
+      "condition_correction": [
+        3,
+        null
+      ],
+      "parameter_dense": [
+        1,
+        300
+      ],
+      "long_state": [
+        1,
+        200
+      ]
+    },
+    "minimum_argument_items": 4,
+    "minimum_state_items": 10
+  },
+  "decision_distribution": {
+    "no_tool": 642,
+    "call_tool": 1911,
+    "ask_user": 171
+  }
+}

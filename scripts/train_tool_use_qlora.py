@@ -79,6 +79,7 @@ def main() -> None:
     parser.add_argument("--train", type=Path, default=Path("data/tool_use/train.jsonl"))
     parser.add_argument("--validation", type=Path, default=Path("data/tool_use/validation.jsonl"))
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/tool_use_qlora_adapter"))
+    parser.add_argument("--run-name", default=None)
     parser.add_argument("--epochs", type=float, default=1)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--warmup-steps", type=int, default=20)
@@ -87,8 +88,16 @@ def main() -> None:
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-train-samples", type=int, default=None, help="small local smoke run")
     parser.add_argument("--max-validation-samples", type=int, default=None)
+    parser.add_argument("--logging-steps", type=int, default=10)
+    parser.add_argument("--eval-steps", type=int, default=50)
+    parser.add_argument("--save-steps", type=int, default=50)
+    parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    if args.save_steps % args.eval_steps != 0:
+        raise ValueError("--save-steps must be a multiple of --eval-steps")
 
     if not torch.cuda.is_available():
         raise RuntimeError("QLoRA training requires an NVIDIA GPU; inference-only tests can run on CPU.")
@@ -142,13 +151,20 @@ def main() -> None:
         gradient_checkpointing=True,
         warmup_steps=args.warmup_steps,
         lr_scheduler_type="cosine",
-        logging_steps=10,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=1,
+        logging_steps=args.logging_steps,
+        eval_strategy="steps",
+        eval_steps=args.eval_steps,
+        save_strategy="steps",
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         fp16=True,
         report_to="none",
         seed=args.seed,
+        data_seed=args.seed,
+        run_name=args.run_name,
     )
     trainer = Trainer(
         model=model,
@@ -157,12 +173,16 @@ def main() -> None:
         eval_dataset=validation_dataset,
         data_collator=CausalCollator(tokenizer.pad_token_id),
     )
-    train_result = trainer.train()
+    train_result = trainer.train(
+        resume_from_checkpoint=(
+            str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None
+        )
+    )
     validation_metrics = next(
         (entry for entry in reversed(trainer.state.log_history) if "eval_loss" in entry), {}
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(args.output_dir)
+    trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     metadata = {
         "scope": "Agent Trace SFT for multi-turn state tracking and guarded tool decisions",

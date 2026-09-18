@@ -35,23 +35,20 @@ Canonical Agent Trace ───────► 4bit QLoRA SFT
 
 ## 核心结果
 
-实验在 RTX 3060 Laptop 6GB 上完成：1,968 条训练样本、440 条验证样本，4bit QLoRA 训练 1 epoch；随后在固定 440 条 test 与 80 条 challenge 上以贪心解码评测。
+V1 使用 1,968 条训练样本完成首轮 QLoRA；随后只在训练集内对非工具边界、条件修正、多参数调用和长状态样本进行确定性重采样，构建 2,724 条 V2 训练记录。验证、测试和 challenge 均未进入训练。两轮模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。
 
-| 指标 | Base（test） | QLoRA（test） | QLoRA（challenge） |
+| 指标 | V1（test） | V2（test） | V2（challenge） |
 | --- | ---: | ---: | ---: |
-| 严格 JSON 合法率 | 0.00% | **96.36%** | **93.75%** |
-| Schema 合法率 | 2.50% | **98.41%** | **98.75%** |
-| 状态 Slot F1 | 1.71% | **89.17%** | **89.59%** |
-| 决策准确率 | 2.50% | **91.82%** | **91.25%** |
-| 工具选择准确率 | 1.14% | **86.93%** | **81.58%** |
-| 参数 Slot F1 | 0.00% | **68.63%** | **59.61%** |
-| 参数完全匹配率 | 0.00% | **31.82%** | **23.68%** |
-| 追问决策准确率 | 0.00% | **100.00%** | **100.00%** |
-| 非工具轮误调用率 ↓ | 0.00%¹ | 11.36% | **9.52%** |
+| 严格 JSON 合法率 | 96.36% | **98.18%** | 95.00% |
+| Schema 合法率 | **98.41%** | 97.95% | 93.75% |
+| 状态 Slot F1 | 89.17% | **92.96%** | 91.16% |
+| 决策准确率 | 91.82% | **97.27%** | 92.50% |
+| 工具选择准确率 | 86.93% | **95.17%** | 92.11% |
+| 参数 Slot F1 | 68.63% | **79.02%** | 79.65% |
+| 参数完全匹配率 | 31.82% | **42.61%** | 42.11% |
+| 非工具轮误调用率 ↓ | 11.36% | **3.41%** | 2.38% |
 
-¹ Base 几乎不能输出合法协议，因此没有形成有效工具调用；该 0% 不代表更安全。
-
-结果证明后训练显著改善了协议遵循、状态维护和工具路由，但也暴露出三个真实短板：长状态全量匹配、参数精确生成、结束语误调用。项目保留严格指标和失败样例，不用宽松 Slot F1 掩盖 Exact Match 问题。完整结果见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)。
+V2 的核心改进形成了“会选工具、会填参数、该停止时不乱调用”的完整链路：固定 test 中工具选择为 335/352，非工具场景误调用为 3/88；参数 Slot F1 的 matched/predicted/target 分别为 851/1091/1063。参数完全匹配仍只有 42.61%，因此项目不宣称已经解决复杂参数精确生成。V1 报告见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)，第二轮训练与评测见 [V2 完整摘要](reports/V2_RUN_SUMMARY.md)。
 
 ## 1. Canonical Agent Trace
 
@@ -151,6 +148,9 @@ python -m pytest -q
 .\run_local.ps1 -Mode trace
 .\run_local.ps1 -Mode smoke
 .\run_local.ps1 -Mode train
+.\run_local.ps1 -Mode build-v2
+.\run_local.ps1 -Mode train-v2
+.\run_local.ps1 -Mode pipeline-v2
 .\run_local.ps1 -Mode eval-base
 .\run_local.ps1 -Mode eval-qlora
 .\run_local.ps1 -Mode eval-challenge
@@ -173,12 +173,15 @@ src/gemma_eval/runtime.py          受控编排与运行 Trace
 src/gemma_eval/traces.py           Canonical Agent Trace 与 SFT 渲染
 src/gemma_eval/benchmark.py        分场景 Benchmark 切片
 scripts/build_tool_use_dataset.py  CrossWOZ → 训练样本
+scripts/build_v2_curriculum.py     V1失败切片 → V2训练集内定向重采样
 scripts/export_agent_traces.py     训练样本 → Agent Trace JSONL
 scripts/train_tool_use_qlora.py    4bit QLoRA SFT
 scripts/evaluate_tool_use.py       逐样本模型评测
+scripts/summarize_v2_run.py        汇总V2训练配置与三套评测结果
 scripts/run_agent_benchmark.py     场景级可靠性报告
 scripts/analyze_tool_use_results.py 错误分析与实验报告
 tests/test_tool_use.py             契约、策略、工具、Trace、Benchmark 测试
+tests/test_v2_curriculum.py        V2样本分类、复制和标签不变性测试
 ```
 
 `decoding.py` 与 `gemma3_core.py` 是早期手写生成和 Gemma Decoder 对齐实验，保留为模型原理附录，不参与当前主线指标。
@@ -193,7 +196,7 @@ tests/test_tool_use.py             契约、策略、工具、Trace、Benchmark 
 - [qwen35-agent-post-training](https://github.com/CHEN2003-CHIP/qwen35-agent-post-training)：社区项目中对 Tool-Use SFT、策略安全和本地 Benchmark 的工程组织；
 - [Llama3-FunctionCalling](https://github.com/michaelnny/Llama3-FunctionCalling)：工具元数据、LoRA 训练与本地推理的完整链路。
 
-详细取舍见 [系统设计](docs/系统设计与求职定位.md)，从零学习见 [项目学习与面试手册](docs/项目学习与面试手册.md)，简历表述见 [简历与面试表达](docs/简历与面试表达.md)。
+详细取舍见 [系统设计](docs/系统设计与求职定位.md)。第一次学习和面试准备请直接看 [面试口语学习手册](docs/项目学习与面试手册.md)；需要按代码链路理解时查 [技术主线参考](docs/项目学习主线_技术参考.md)，需要补全部原理、指标和实验计划时查 [完整参考手册](docs/项目学习与面试手册_完整参考.md)。简历表述见 [简历与面试表达](docs/简历与面试表达.md)。
 
 ## 边界
 
