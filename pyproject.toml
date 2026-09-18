@@ -10,6 +10,7 @@ dependencies = [
   "bitsandbytes>=0.45",
   "huggingface-hub>=0.27",
   "peft>=0.14",
+  "trl>=1.13.0",
   "python-dotenv>=1.0",
 ]
 

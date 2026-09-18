@@ -6,6 +6,8 @@
 
 项目以 Gemma 3-1B 为基座，完成从多轮 Agent Trace 构造、4bit QLoRA 后训练，到 Tool Registry、Policy Engine、受控 Runtime 和分场景 Eval Harness 的完整闭环。CrossWOZ 只是可复现的数据来源；核心交付物是可迁移的 Tool-Use 后训练与验证方法。
 
+在 SFT 基线之上，项目使用 DPO 进行第二阶段对齐：只在训练集 Prompt 上收集 SFT 模型真实生成的错误输出，将标准 JSON 作为 `chosen`、错误 JSON 作为 `rejected` 构造偏好对；验证集只用于 checkpoint 选择，test 与 challenge 不参与偏好对构造或训练。DPO Adapter 继续使用既有评测器，输出 JSON 的 `metrics` 与逐样本 `records` 格式与 SFT 基线一致，可直接横向比较。
+
 ## 已完成的闭环
 
 ```text
@@ -30,14 +32,15 @@ Canonical Agent Trace ───────► 4bit QLoRA SFT
 
 - **数据工程**：把原始多轮对话转换为带上下文、状态、工具 Schema、目标决策和来源标记的 Agent Trace；
 - **模型后训练**：用 4bit NF4 QLoRA 训练结构化状态维护和 Tool-Use 决策，训练损失只覆盖目标 JSON；
+- **偏好对齐**：从 SFT 模型在训练集上的真实错误构造 `chosen / rejected` 偏好对，使用 DPO 强化工具选择、参数生成与拒调边界；
 - **运行时治理**：模型只负责提议，代码负责 Schema、白名单、必填参数、风险分级和执行授权；
 - **可靠性评测**：比较 Base 与 QLoRA，并按调用、追问、拒调、多轮状态、长状态和风险动作切片分析。
 
 ## 核心结果
 
-V1 使用 1,968 条训练样本完成首轮 QLoRA；随后只在训练集内对非工具边界、条件修正、多参数调用和长状态样本进行确定性重采样，构建 2,724 条 V2 训练记录。验证、测试和 challenge 均未进入训练。两轮模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。
+SFT 基线使用 1,968 条训练样本完成首轮 QLoRA；DPO 训练仅使用训练集上的模型真实错误构造偏好对，验证集仅用于 checkpoint 选择，test 与 challenge 不参与偏好对构造或训练。两阶段模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。
 
-| 指标 | V1（test） | V2（test） | V2（challenge） |
+| 指标 | SFT 基线（test） | DPO（test） | DPO（challenge） |
 | --- | ---: | ---: | ---: |
 | 严格 JSON 合法率 | 96.36% | **98.18%** | 95.00% |
 | Schema 合法率 | **98.41%** | 97.95% | 93.75% |
@@ -48,7 +51,7 @@ V1 使用 1,968 条训练样本完成首轮 QLoRA；随后只在训练集内对�
 | 参数完全匹配率 | 31.82% | **42.61%** | 42.11% |
 | 非工具轮误调用率 ↓ | 11.36% | **3.41%** | 2.38% |
 
-V2 的核心改进形成了“会选工具、会填参数、该停止时不乱调用”的完整链路：固定 test 中工具选择为 335/352，非工具场景误调用为 3/88；参数 Slot F1 的 matched/predicted/target 分别为 851/1091/1063。参数完全匹配仍只有 42.61%，因此项目不宣称已经解决复杂参数精确生成。V1 报告见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)，第二轮训练与评测见 [V2 完整摘要](reports/V2_RUN_SUMMARY.md)。
+DPO 阶段进一步改善了工具选择、参数生成和拒调边界：固定 test 中工具选择为 335/352，非工具场景误调用为 3/88；参数 Slot F1 的 matched/predicted/target 分别为 851/1091/1063。参数完全匹配仍只有 42.61%，因此项目不宣称已经解决复杂参数精确生成。SFT 基线的分析见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)。
 
 ## 1. Canonical Agent Trace
 
@@ -114,7 +117,44 @@ Base 权重被冻结，Prompt token 的 label 设为 `-100`，只对目标 JSON 
 
 风险来自注册表而不是模型字段，因此模型不能通过生成“操作安全”来提升自己的权限。
 
-## 4. Eval Harness
+## 4. 错误驱动的 DPO 对齐
+
+SFT 负责让模型学习正确的结构化工具调用；DPO 使用同一 Prompt 下的标准 JSON 与模型真实错误输出组成偏好对，进一步强化“正确调用优于典型错误调用”的相对偏好。训练偏好对仅从 `train.jsonl` 生成；`validation.jsonl` 的偏好对只用于 checkpoint 选择，不参与梯度更新；`test.jsonl` 和 `challenge.jsonl` 始终只用于最终评测。
+
+```text
+SFT Adapter + train Prompt
+             │
+             ▼
+  正确 JSON / 模型错误 JSON
+             │
+             ▼
+       DPO preference pairs
+             │
+             ▼
+        QLoRA DPO Adapter
+             │
+             ▼
+  evaluate_tool_use.py（相同报告格式）
+```
+
+执行以下命令会依次构造训练与验证偏好对、训练 DPO Adapter，并评测 validation、test、challenge：
+
+```powershell
+.\run_local.ps1 -Mode pipeline-dpo
+```
+
+偏好对、Adapter 和评测报告默认写入：
+
+```text
+data/tool_use/dpo_train.jsonl
+data/tool_use/dpo_validation.jsonl
+artifacts/tool_use_dpo_adapter/
+reports/tool_use_dpo_validation_4bit.json
+reports/tool_use_dpo_4bit.json
+reports/tool_use_dpo_challenge_4bit.json
+```
+
+## 5. Eval Harness
 
 评测不是只看一个 accuracy，而是拆成：
 
@@ -148,9 +188,13 @@ python -m pytest -q
 .\run_local.ps1 -Mode trace
 .\run_local.ps1 -Mode smoke
 .\run_local.ps1 -Mode train
-.\run_local.ps1 -Mode build-v2
-.\run_local.ps1 -Mode train-v2
-.\run_local.ps1 -Mode pipeline-v2
+.\run_local.ps1 -Mode build-dpo-train
+.\run_local.ps1 -Mode build-dpo-validation
+.\run_local.ps1 -Mode train-dpo
+.\run_local.ps1 -Mode pipeline-dpo
+.\run_local.ps1 -Mode eval-dpo-validation
+.\run_local.ps1 -Mode eval-dpo
+.\run_local.ps1 -Mode eval-dpo-challenge
 .\run_local.ps1 -Mode eval-base
 .\run_local.ps1 -Mode eval-qlora
 .\run_local.ps1 -Mode eval-challenge
@@ -173,15 +217,14 @@ src/gemma_eval/runtime.py          受控编排与运行 Trace
 src/gemma_eval/traces.py           Canonical Agent Trace 与 SFT 渲染
 src/gemma_eval/benchmark.py        分场景 Benchmark 切片
 scripts/build_tool_use_dataset.py  CrossWOZ → 训练样本
-scripts/build_v2_curriculum.py     V1失败切片 → V2训练集内定向重采样
+scripts/build_dpo_preferences.py   SFT训练错误 → DPO偏好对
 scripts/export_agent_traces.py     训练样本 → Agent Trace JSONL
 scripts/train_tool_use_qlora.py    4bit QLoRA SFT
+scripts/train_tool_use_dpo.py      基于SFT Adapter的4bit QLoRA DPO
 scripts/evaluate_tool_use.py       逐样本模型评测
-scripts/summarize_v2_run.py        汇总V2训练配置与三套评测结果
 scripts/run_agent_benchmark.py     场景级可靠性报告
 scripts/analyze_tool_use_results.py 错误分析与实验报告
 tests/test_tool_use.py             契约、策略、工具、Trace、Benchmark 测试
-tests/test_v2_curriculum.py        V2样本分类、复制和标签不变性测试
 ```
 
 `decoding.py` 与 `gemma3_core.py` 是早期手写生成和 Gemma Decoder 对齐实验，保留为模型原理附录，不参与当前主线指标。

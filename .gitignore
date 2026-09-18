@@ -8,6 +8,8 @@ artifacts/
 logs/
 result/
 data/tool_use/train_v2.jsonl
+data/tool_use/dpo_*.jsonl
+data/tool_use/dpo_*.manifest.json
 data/traces/
 data/raw/
 data/workorder/
