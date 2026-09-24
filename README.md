@@ -6,7 +6,7 @@
 
 项目以 Gemma 3-1B 为基座，完成从多轮 Agent Trace 构造、4bit QLoRA 后训练，到 Tool Registry、Policy Engine、受控 Runtime 和分场景 Eval Harness 的完整闭环。CrossWOZ 只是可复现的数据来源；核心交付物是可迁移的 Tool-Use 后训练与验证方法。
 
-在 SFT 基线之上，项目使用 DPO 进行第二阶段对齐：只在训练集 Prompt 上收集 SFT 模型真实生成的错误输出，将标准 JSON 作为 `chosen`、错误 JSON 作为 `rejected` 构造偏好对；验证集只用于 checkpoint 选择，test 与 challenge 不参与偏好对构造或训练。DPO Adapter 继续使用既有评测器，输出 JSON 的 `metrics` 与逐样本 `records` 格式与 SFT 基线一致，可直接横向比较。
+仓库还实现了 DPO 偏好对构造、训练与评测流程：偏好对设计为仅从训练集 Prompt 上的 SFT 错误生成，验证集用于 checkpoint 选择，test 与 challenge 留作最终评测。**下表的第二轮结果来自 V2 定向重采样的 SFT 实验，不是 DPO 实验。** 当前公开仓库没有可复核的 DPO 训练日志、Adapter 与逐样本评测产物，因此暂不报告 DPO 相对 SFT 的收益。
 
 ## 已完成的闭环
 
@@ -32,15 +32,15 @@ Canonical Agent Trace ───────► 4bit QLoRA SFT
 
 - **数据工程**：把原始多轮对话转换为带上下文、状态、工具 Schema、目标决策和来源标记的 Agent Trace；
 - **模型后训练**：用 4bit NF4 QLoRA 训练结构化状态维护和 Tool-Use 决策，训练损失只覆盖目标 JSON；
-- **偏好对齐**：从 SFT 模型在训练集上的真实错误构造 `chosen / rejected` 偏好对，使用 DPO 强化工具选择、参数生成与拒调边界；
+- **偏好对齐流程**：提供从 SFT 模型训练集错误构造 `chosen / rejected` 偏好对并运行 DPO 的脚本；实际收益需另行评测；
 - **运行时治理**：模型只负责提议，代码负责 Schema、白名单、必填参数、风险分级和执行授权；
 - **可靠性评测**：比较 Base 与 QLoRA，并按调用、追问、拒调、多轮状态、长状态和风险动作切片分析。
 
 ## 核心结果
 
-SFT 基线使用 1,968 条训练样本完成首轮 QLoRA；DPO 训练仅使用训练集上的模型真实错误构造偏好对，验证集仅用于 checkpoint 选择，test 与 challenge 不参与偏好对构造或训练。两阶段模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。
+首轮 SFT 使用 1,968 条训练样本；V2 在训练集内对指定难例做定向重采样，形成 2,724 条训练记录。两轮 SFT 模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。数据划分与分项结果见 [V2 定向训练与评测摘要](reports/V2_RUN_SUMMARY.md)。
 
-| 指标 | SFT 基线（test） | DPO（test） | DPO（challenge） |
+| 指标 | 首轮 SFT（test） | V2 SFT（test） | V2 SFT（challenge） |
 | --- | ---: | ---: | ---: |
 | 严格 JSON 合法率 | 96.36% | **98.18%** | 95.00% |
 | Schema 合法率 | **98.41%** | 97.95% | 93.75% |
@@ -51,7 +51,7 @@ SFT 基线使用 1,968 条训练样本完成首轮 QLoRA；DPO 训练仅使用�
 | 参数完全匹配率 | 31.82% | **42.61%** | 42.11% |
 | 非工具轮误调用率 ↓ | 11.36% | **3.41%** | 2.38% |
 
-DPO 阶段进一步改善了工具选择、参数生成和拒调边界：固定 test 中工具选择为 335/352，非工具场景误调用为 3/88；参数 Slot F1 的 matched/predicted/target 分别为 851/1091/1063。参数完全匹配仍只有 42.61%，因此项目不宣称已经解决复杂参数精确生成。SFT 基线的分析见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)。
+V2 定向训练改善了工具选择、参数生成和拒调边界：固定 test 中工具选择为 335/352，非工具场景误调用为 3/88；参数 Slot F1 的 matched/predicted/target 分别为 851/1091/1063。参数完全匹配仍只有 42.61%。首轮 SFT 的分析见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)。**97.27% 决策准确率与 79.02% 参数 Slot F1 不能引用为 DPO 的提升。**
 
 ## 1. Canonical Agent Trace
 
@@ -117,9 +117,9 @@ Base 权重被冻结，Prompt token 的 label 设为 `-100`，只对目标 JSON 
 
 风险来自注册表而不是模型字段，因此模型不能通过生成“操作安全”来提升自己的权限。
 
-## 4. 错误驱动的 DPO 对齐
+## 4. 错误驱动的 DPO 流程（结果待核实）
 
-SFT 负责让模型学习正确的结构化工具调用；DPO 使用同一 Prompt 下的标准 JSON 与模型真实错误输出组成偏好对，进一步强化“正确调用优于典型错误调用”的相对偏好。训练偏好对仅从 `train.jsonl` 生成；`validation.jsonl` 的偏好对只用于 checkpoint 选择，不参与梯度更新；`test.jsonl` 和 `challenge.jsonl` 始终只用于最终评测。
+SFT 负责让模型学习结构化工具调用；DPO 脚本设计为使用同一 Prompt 下的标准 JSON 与模型真实错误输出组成偏好对。训练偏好对从 `train.jsonl` 生成；`validation.jsonl` 的偏好对用于 checkpoint 选择，不参与梯度更新；`test.jsonl` 和 `challenge.jsonl` 留作最终评测。代码与命令已提交，公开仓库尚无足以核实 DPO 效果的运行产物。
 
 ```text
 SFT Adapter + train Prompt
