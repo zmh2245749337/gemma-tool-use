@@ -5,10 +5,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Python = "C:\anaconda\envs\gemma-workorder\python.exe"
+$Python = if ($env:GEMMA_PYTHON) { $env:GEMMA_PYTHON } else { "python" }
 
-if (-not (Test-Path -LiteralPath $Python)) {
-    throw "gemma-workorder environment not found: $Python"
+if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
+    throw "Python environment not found: $Python. Set GEMMA_PYTHON to the Python executable for this project."
 }
 
 Set-Location -LiteralPath $ProjectRoot

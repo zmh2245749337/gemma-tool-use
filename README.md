@@ -1,12 +1,12 @@
-# Gemma Agent Tool-Use Lab
+# Gemma Tool-Use：小模型多轮工具调用后训练与受控执行
 
-> 面向任务型 Agent 的小模型工具学习、受控执行与可靠性评测框架。
+> 面向多轮任务型对话，训练 Gemma 3-1B 在工具调用、缺参追问和直接回复之间做出决策并生成工具参数。
 
-本项目研究的不是“再搭一个聊天机器人”，而是 Agent 系统中更难验证的一层：**怎样把通用小模型训练成稳定的工具决策器，并用确定性运行时约束它何时调用、何时追问、何时停止。**
+**技术栈：** PyTorch、Transformers、PEFT、QLoRA、SFT、DPO、Function Calling。
 
-项目以 Gemma 3-1B 为基座，完成从多轮 Agent Trace 构造、4bit QLoRA 后训练，到 Tool Registry、Policy Engine、受控 Runtime 和分场景 Eval Harness 的完整闭环。CrossWOZ 只是可复现的数据来源；核心交付物是可迁移的 Tool-Use 后训练与验证方法。
+基于 CrossWOZ 官方语料构建覆盖 5 类任务的多轮工具调用监督数据，按每轮用户状态与系统查询记录重建训练标签。使用 Transformers 与 PEFT 对 Gemma 3-1B 进行 4bit NF4 QLoRA 微调；只对目标 JSON 计算损失，让模型结合历史上下文和累计状态完成状态更新、调用决策与参数生成。
 
-仓库还实现了 DPO 偏好对构造、训练与评测流程：偏好对设计为仅从训练集 Prompt 上的 SFT 错误生成，验证集用于 checkpoint 选择，test 与 challenge 留作最终评测。**下表的第二轮结果来自 V2 定向重采样的 SFT 实验，不是 DPO 实验。** 当前公开仓库没有可复核的 DPO 训练日志、Adapter 与逐样本评测产物，因此暂不报告 DPO 相对 SFT 的收益。
+模型输出经过工具白名单、字段类型与必填项校验；缺参时继续追问，有副作用的调用转人工确认。仓库也提供从 SFT 训练集错误构造偏好对、进行 DPO 训练与评测的流程。项目方法与简历一致；下方公开指标的实验来源单独标明。
 
 ## 已完成的闭环
 
@@ -38,7 +38,7 @@ Canonical Agent Trace ───────► 4bit QLoRA SFT
 
 ## 核心结果
 
-首轮 SFT 使用 1,968 条训练样本；V2 在训练集内对指定难例做定向重采样，形成 2,724 条训练记录。两轮 SFT 模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。数据划分与分项结果见 [V2 定向训练与评测摘要](reports/V2_RUN_SUMMARY.md)。
+首轮 SFT 使用 1,968 条训练样本；V2 在训练集内对工具误选、参数缺漏和非工具场景误调用等难例定向重采样，形成 2,724 条训练记录。两轮模型在固定 440 条 test 与 80 条 challenge 上使用相同 Prompt、4bit 精度和贪心解码评测。数据划分与分项结果见 [V2 定向训练与评测摘要](reports/V2_RUN_SUMMARY.md)。
 
 | 指标 | 首轮 SFT（test） | V2 SFT（test） | V2 SFT（challenge） |
 | --- | ---: | ---: | ---: |
@@ -51,7 +51,7 @@ Canonical Agent Trace ───────► 4bit QLoRA SFT
 | 参数完全匹配率 | 31.82% | **42.61%** | 42.11% |
 | 非工具轮误调用率 ↓ | 11.36% | **3.41%** | 2.38% |
 
-V2 定向训练改善了工具选择、参数生成和拒调边界：固定 test 中工具选择为 335/352，非工具场景误调用为 3/88；参数 Slot F1 的 matched/predicted/target 分别为 851/1091/1063。参数完全匹配仍只有 42.61%。首轮 SFT 的分析见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)。**97.27% 决策准确率与 79.02% 参数 Slot F1 不能引用为 DPO 的提升。**
+固定 test 上，调用决策准确率由 91.82% 提升至 97.27%，参数 Slot F1 由 68.63% 提升至 79.02%。这组公开结果来自 **V2 第二轮 SFT**；DPO 流程已实现，但尚无可复核的独立 DPO 评测产物。参数完全匹配率为 42.61%，仍是主要改进点。首轮分析见 [实验报告](reports/EXPERIMENT_REPORT.md) 与 [分场景基准](reports/BENCHMARK_REPORT.md)。
 
 ## 1. Canonical Agent Trace
 
@@ -181,7 +181,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-本机已配置 `C:\anaconda\envs\gemma-workorder` 时，使用统一入口：
+在已安装依赖的 Python 环境中，使用统一入口。脚本默认调用当前环境的 `python`；如需指定解释器，可先设置 `GEMMA_PYTHON`：
 
 ```powershell
 .\run_local.ps1 -Mode check
